@@ -4,4 +4,5 @@ version = "0.1.0"
 description = "Script to add uninstrumented sources to Odigos"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
 dependencies = []
