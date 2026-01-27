@@ -64,7 +64,10 @@ class GraphQLClient:
         logger.debug(f"GraphQL client initialized with endpoint: {endpoint}")
 
     def query(
-        self, query: str, variables: Optional[Dict[str, Any]] = None
+        self,
+        query: str,
+        variables: Optional[Dict[str, Any]] = None,
+        max_retries: int = 3,
     ) -> Dict[str, Any]:
         """
         Execute a GraphQL query.
@@ -72,13 +75,13 @@ class GraphQLClient:
         Args:
             query: The GraphQL query string
             variables: Optional dictionary of variables for the query
+            max_retries: Maximum number of retry attempts for connection errors
 
         Returns:
             Dictionary containing the GraphQL response
 
         Raises:
-            urllib.error.HTTPError: If the HTTP request fails
-            urllib.error.URLError: If there's a network error
+            Exception: If the HTTP request fails after all retries
         """
         # Prepare the request payload
         payload = {
@@ -103,23 +106,62 @@ class GraphQLClient:
             self.endpoint, data=data, headers=self.headers, method="POST"
         )
 
-        # Execute the request
-        try:
-            with self.opener.open(req) as response:
-                response_data = json.loads(response.read().decode("utf-8"))
-                if "errors" in response_data:
-                    logger.error(f"GraphQL errors: {response_data['errors']}")
+        # Retry logic for connection errors
+        last_exception = None
+        for attempt in range(max_retries):
+            try:
+                with self.opener.open(req, timeout=30) as response:
+                    response_data = json.loads(response.read().decode("utf-8"))
+                    if "errors" in response_data:
+                        logger.error(f"GraphQL errors: {response_data['errors']}")
+                    else:
+                        logger.debug("GraphQL query executed successfully")
+                    return response_data
+            except (
+                ConnectionResetError,
+                ConnectionRefusedError,
+                BrokenPipeError,
+                TimeoutError,
+                socket.timeout,
+            ) as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2  # Exponential backoff: 2s, 4s, 6s
+                    logger.warning(
+                        f"Connection error (attempt {attempt + 1}/{max_retries}): {e}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
                 else:
-                    logger.debug("GraphQL query executed successfully")
-                return response_data
-        except urllib.error.HTTPError as e:
-            # Read error response body if available
-            error_body = e.read().decode("utf-8") if e.fp else None
-            logger.error(f"HTTP Error {e.code}: {e.reason}. Response: {error_body}")
-            raise Exception(f"HTTP Error {e.code}: {e.reason}. Response: {error_body}")
-        except urllib.error.URLError as e:
-            logger.error(f"URL Error: {e.reason}")
-            raise Exception(f"URL Error: {e.reason}")
+                    logger.error(f"Connection failed after {max_retries} attempts: {e}")
+                    raise Exception(
+                        f"Connection failed after {max_retries} attempts: {e}"
+                    ) from e
+            except urllib.error.HTTPError as e:
+                # Do not retry HTTP errors (4xx, 5xx)
+                error_body = e.read().decode("utf-8") if e.fp else None
+                logger.error(f"HTTP Error {e.code}: {e.reason}. Response: {error_body}")
+                raise Exception(
+                    f"HTTP Error {e.code}: {e.reason}. Response: {error_body}"
+                ) from e
+            except urllib.error.URLError as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2
+                    logger.warning(
+                        f"URL error (attempt {attempt + 1}/{max_retries}): {e.reason}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"URL Error after {max_retries} attempts: {e.reason}")
+                    raise Exception(
+                        f"URL Error after {max_retries} attempts: {e.reason}"
+                    ) from e
+
+        if last_exception:
+            raise last_exception
+        raise Exception("Query failed for unknown reason")
 
     def get_namespaces(self):
         """
