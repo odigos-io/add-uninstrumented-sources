@@ -5,17 +5,20 @@ A command-line tool that identifies and instruments Kubernetes workloads that ar
 ## What It Does
 
 1. Checks if `kubectl` is available in your PATH
-2. Establishes a port-forward to the Odigos UI service (`svc/ui` in `odigos-system` namespace)
+2. Establishes a port-forward to the Odigos UI service (`svc/ui` in the specified namespace)
 3. Connects to the Odigos GraphQL API at `http://localhost:3000/graphql`
-4. Fetches all workloads and identifies those that are not instrumented
-5. Optionally exports uninstrumented workloads to a CSV file
-6. Updates the instrumentation status for uninstrumented workloads (unless `--dry-run` is specified)
+4. Fetches all namespaces from the cluster
+5. Filters out ignored namespaces (default: `kube-system`, `kube-public`, `default`)
+6. Fetches workloads for each remaining namespace
+7. Identifies workloads that are not instrumented
+8. Optionally exports uninstrumented workloads to a CSV file
+9. Updates the instrumentation status for uninstrumented workloads (unless `--dry-run` is specified)
 
 ## Requirements
 
 - **Python 3.10+**
 - **kubectl** - Must be installed and available in PATH
-- **Kubernetes cluster access** - kubectl must have access to the `odigos-system` namespace
+- **Kubernetes cluster access** - kubectl must have access to the Odigos namespace (specified via `--odigos-namespace`)
 - **Odigos installation** - The Odigos UI service must be running in the cluster
 
 ## Installation
@@ -42,9 +45,11 @@ python odigos_instrument.py [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
+| `--odigos-namespace NAMESPACE` | **Required.** The namespace where Odigos is installed (e.g., `odigos-system`) |
 | `--log-level` | Set logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (default: `INFO`) |
 | `--log-file FILE` | Write logs to a file in addition to console |
 | `--export-csv FILE` | Export uninstrumented workloads to a CSV file |
+| `--ignore-namespaces NAMESPACE [NAMESPACE ...]` | List of namespaces to ignore when fetching workloads (default: `kube-system kube-public default`) |
 | `--dry-run` | Preview changes without updating instrumentation |
 | `--help` | Display help message |
 
@@ -52,10 +57,10 @@ python odigos_instrument.py [OPTIONS]
 
 ### Basic Usage
 
-Run with default INFO logging level:
+Run with default INFO logging level (namespace is required):
 
 ```bash
-python odigos_instrument.py
+python odigos_instrument.py --odigos-namespace odigos-system
 ```
 
 ### Dry Run (Preview Only)
@@ -63,7 +68,7 @@ python odigos_instrument.py
 See what would be updated without making changes:
 
 ```bash
-python odigos_instrument.py --dry-run
+python odigos_instrument.py --odigos-namespace odigos-system --dry-run
 ```
 
 ### Export to CSV
@@ -71,13 +76,25 @@ python odigos_instrument.py --dry-run
 Export uninstrumented sources to a CSV file without updating:
 
 ```bash
-python odigos_instrument.py --export-csv uninstrumented.csv --dry-run
+python odigos_instrument.py --odigos-namespace odigos-system --export-csv uninstrumented.csv --dry-run
 ```
 
 Export to CSV and update instrumentation:
 
 ```bash
-python odigos_instrument.py --export-csv sources.csv
+python odigos_instrument.py --odigos-namespace odigos-system --export-csv sources.csv
+```
+
+### Ignoring Namespaces
+
+By default, the tool ignores `kube-system`, `kube-public`, and `default` namespaces. You can customize this:
+
+```bash
+# Ignore only kube-system
+python odigos_instrument.py --odigos-namespace odigos-system --ignore-namespaces kube-system
+
+# Ignore multiple custom namespaces
+python odigos_instrument.py --odigos-namespace odigos-system --ignore-namespaces kube-system monitoring logging
 ```
 
 ### Logging Options
@@ -85,25 +102,25 @@ python odigos_instrument.py --export-csv sources.csv
 Run with DEBUG logging for detailed output:
 
 ```bash
-python odigos_instrument.py --log-level DEBUG
+python odigos_instrument.py --odigos-namespace odigos-system --log-level DEBUG
 ```
 
 Run with WARNING level to suppress info messages:
 
 ```bash
-python odigos_instrument.py --log-level WARNING
+python odigos_instrument.py --odigos-namespace odigos-system --log-level WARNING
 ```
 
 Log to a file:
 
 ```bash
-python odigos_instrument.py --log-file /path/to/logfile.log
+python odigos_instrument.py --odigos-namespace odigos-system --log-file /path/to/logfile.log
 ```
 
 Combine DEBUG level with file logging:
 
 ```bash
-python odigos_instrument.py --log-level DEBUG --log-file debug.log
+python odigos_instrument.py --odigos-namespace odigos-system --log-level DEBUG --log-file debug.log
 ```
 
 ## CSV Output Format
