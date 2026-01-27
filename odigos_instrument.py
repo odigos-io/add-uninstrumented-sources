@@ -58,6 +58,9 @@ class GraphQLClient:
         # Set default content type if not provided
         if "Content-Type" not in self.headers:
             self.headers["Content-Type"] = "application/json"
+        # Create an opener that doesn't use proxies
+        proxy_handler = urllib.request.ProxyHandler({})
+        self.opener = urllib.request.build_opener(proxy_handler)
         logger.debug(f"GraphQL client initialized with endpoint: {endpoint}")
 
     def query(
@@ -102,7 +105,7 @@ class GraphQLClient:
 
         # Execute the request
         try:
-            with urllib.request.urlopen(req) as response:
+            with self.opener.open(req) as response:
                 response_data = json.loads(response.read().decode("utf-8"))
                 if "errors" in response_data:
                     logger.error(f"GraphQL errors: {response_data['errors']}")
@@ -118,22 +121,53 @@ class GraphQLClient:
             logger.error(f"URL Error: {e.reason}")
             raise Exception(f"URL Error: {e.reason}")
 
-    def get_workloads(self):
-        logger.info("Fetching workloads from GraphQL API")
-        query = """query GetWorkloads($filter: WorkloadFilter) {
-                    workloads(filter: $filter) {
-                        id {
-                        namespace
-                        kind
-                        name
-                        }
-                        podsAgentInjectionStatus {
-                        status
-                        message
-                        }
-                    }
-                    }"""
+    def get_namespaces(self):
+        """
+        Fetch all namespaces from the GraphQL API.
+
+        Returns:
+            Dictionary containing the GraphQL response with namespaces
+        """
+        logger.info("Fetching namespaces from GraphQL API")
+        query = """query GetNamespaces {
+  computePlatform {
+    k8sActualNamespaces {
+      name
+    }
+  }
+}"""
         return self.query(query)
+
+    def get_workloads(self, namespace: Optional[str] = None):
+        """
+        Fetch workloads from the GraphQL API, optionally filtered by namespace.
+
+        Args:
+            namespace: Optional namespace to filter workloads. If None, returns all workloads.
+
+        Returns:
+            Dictionary containing the GraphQL response with workloads
+        """
+        logger.info(
+            f"Fetching workloads from GraphQL API{' for namespace: ' + namespace if namespace else ''}"
+        )
+        query = """query GetWorkloads($filter: WorkloadFilter) {
+  workloads(filter: $filter) {
+    id {
+      namespace
+      kind
+      name
+    }
+    podsAgentInjectionStatus {
+      status
+      message
+    }
+  }
+}"""
+        # Always pass filter, but set to None if no namespace specified (to get all workloads)
+        # or set to namespace filter if namespace is provided
+        variables = {"filter": {"namespace": namespace} if namespace else None}
+        return self.query(query, variables)
 
     def instrumented_workloads(
         self,
@@ -326,43 +360,43 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run with default INFO logging level
-  python odigos_instrument.py
+  # Run with default INFO logging level (odigos-namespace is required)
+  python odigos_instrument.py --odigos-namespace odigos-system
 
   # Run with DEBUG logging for detailed output
-  python odigos_instrument.py --log-level DEBUG
+  python odigos_instrument.py --odigos-namespace odigos-system --log-level DEBUG
 
   # Run with WARNING level to suppress info messages
-  python odigos_instrument.py --log-level WARNING
+  python odigos_instrument.py --odigos-namespace odigos-system --log-level WARNING
 
   # Run with logging to a file
-  python odigos_instrument.py --log-file /path/to/logfile.log
+  python odigos_instrument.py --odigos-namespace odigos-system --log-file /path/to/logfile.log
 
   # Run with DEBUG level and log to file
-  python odigos_instrument.py --log-level DEBUG --log-file debug.log
+  python odigos_instrument.py --odigos-namespace odigos-system --log-level DEBUG --log-file debug.log
 
   # Export uninstrumented sources to CSV file (without updating instrumentation)
-  python odigos_instrument.py --export-csv uninstrumented.csv --dry-run
+  python odigos_instrument.py --odigos-namespace odigos-system --export-csv uninstrumented.csv --dry-run
 
   # Export to CSV and update instrumentation
-  python odigos_instrument.py --export-csv sources.csv
+  python odigos_instrument.py --odigos-namespace odigos-system --export-csv sources.csv
 
   # Just update instrumentation without exporting
-  python odigos_instrument.py
+  python odigos_instrument.py --odigos-namespace odigos-system
 
   # Display this help message
   python odigos_instrument.py --help
 
 What this tool does:
   1. Checks if kubectl is available in your PATH
-  2. Establishes a port-forward to the Odigos UI service (svc/ui in odigos-system namespace)
+  2. Establishes a port-forward to the Odigos UI service (svc/ui in the specified namespace)
   3. Connects to the GraphQL API at http://localhost:3000/graphql
-  4. Fetches all workloads and identifies those that are not instrumented
+  4. Fetches all namespaces and workloads, then identifies those that are not instrumented
   5. Updates the instrumentation status for uninstrumented workloads
 
 Requirements:
   - kubectl must be installed and available in PATH
-  - kubectl must have access to the odigos-system namespace
+  - kubectl must have access to the Odigos namespace (specified via --odigos-namespace)
   - The Odigos UI service must be running in the cluster
         """,
     )
@@ -399,6 +433,21 @@ Requirements:
         help="Export to CSV without updating instrumentation. Use this flag when "
         "you want to see what would be updated without making any changes.",
     )
+    parser.add_argument(
+        "--ignore-namespaces",
+        type=str,
+        nargs="+",
+        default=["kube-system", "kube-public", "default"],
+        help="List of namespaces to ignore when fetching workloads. "
+        "Default: kube-system kube-public default",
+    )
+    parser.add_argument(
+        "--odigos-namespace",
+        type=str,
+        required=True,
+        help="The namespace where Odigos is installed (e.g., odigos-system). "
+        "This is required for port-forwarding to the Odigos UI service.",
+    )
     args = parser.parse_args()
 
     setup_logging(args.log_level, args.log_file)
@@ -408,15 +457,43 @@ Requirements:
         logger.error("kubectl is required but not available")
         sys.exit(1)
 
-    with port_forward_service("svc/ui", "odigos-system", 3000, 3000):
+    with port_forward_service("svc/ui", args.odigos_namespace, 3000, 3000):
         client = GraphQLClient("http://localhost:3000/graphql")
         logger.debug("GraphQL client initialized")
 
-        logger.info("Fetching workloads from GraphQL API")
-        result = client.get_workloads()
-        logger.debug(
-            f"Received {len(result.get('data', {}).get('workloads', []))} workloads"
+        # Get all namespaces
+        logger.info("Fetching namespaces from GraphQL API")
+        namespaces_result = client.get_namespaces()
+        all_namespaces = [
+            ns["name"]
+            for ns in namespaces_result.get("data", {})
+            .get("computePlatform", {})
+            .get("k8sActualNamespaces", [])
+        ]
+        logger.info(f"Found {len(all_namespaces)} total namespaces")
+
+        # Filter out ignored namespaces
+        ignored_namespaces = set(args.ignore_namespaces)
+        filtered_namespaces = [
+            ns for ns in all_namespaces if ns not in ignored_namespaces
+        ]
+        logger.info(f"Ignoring namespaces: {', '.join(sorted(ignored_namespaces))}")
+        logger.info(
+            f"Processing {len(filtered_namespaces)} namespaces (excluding {len(ignored_namespaces)} ignored)"
         )
+
+        # Fetch workloads for each namespace
+        all_workloads = []
+        for namespace in filtered_namespaces:
+            logger.debug(f"Fetching workloads for namespace: {namespace}")
+            result = client.get_workloads(namespace=namespace)
+            workloads = result.get("data", {}).get("workloads", [])
+            all_workloads.extend(workloads)
+            logger.debug(
+                f"Received {len(workloads)} workloads from namespace {namespace}"
+            )
+
+        logger.info(f"Total workloads fetched: {len(all_workloads)}")
 
         instrumented_workloads = [
             SourcesInput(
@@ -424,7 +501,7 @@ Requirements:
                 name=workload["id"]["name"],
                 kind=workload["id"]["kind"],
             )
-            for workload in result["data"]["workloads"]
+            for workload in all_workloads
             if workload["podsAgentInjectionStatus"]["message"] == INSTRUMENTED_STATUS
         ]
         logger.info(f"Found {len(instrumented_workloads)} uninstrumented workloads")
